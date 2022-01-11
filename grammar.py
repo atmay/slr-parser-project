@@ -30,11 +30,13 @@ class Grammar:
             bodies = {tuple(body.split()) for body in bodies.split('|')}
 
             for body in bodies:
+                if '^' in body and body != ('^',):
+                    raise ValueError(f'\'{head} -> {" ".join(body)}\': Символ Null \'^\' не допустим в этом месте.')
                 self.grammar[head].add(body)
 
                 # составляем список терминалов и нетерминалов
                 for symbol in body:
-                    if not symbol.isupper():
+                    if not symbol.isupper() and symbol != '^':
                         self.terminals.add(symbol)
                     elif symbol.isupper():
                         self.nonterminals.add(symbol)
