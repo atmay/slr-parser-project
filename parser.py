@@ -3,155 +3,195 @@ import argparse
 
 from grammar import Grammar
 
+
+def union(set1, set2):
+    """ вспомогательный метод для проверки, добавились ли новые символы во множество"""
+    set1_len = len(set1)
+    # добавляем сет2 в сет1
+    set1 |= set2
+    return set1_len != len(set1)
+
+
 def first_follow(G):
-    def union(set_1, set_2):
-        set_1_len = len(set_1)
-        set_1 |= set_2
+    """Построение множеств follow для каждого
+    """
 
-        return set_1_len != len(set_1)
-
+    # создается словарь с ключами-символами, для каждого символа грамматики создается пустое множество
     first = {symbol: set() for symbol in G.symbols}
+    # для терминалов создаем множество, содержащее сам терминал
     first.update((terminal, {terminal}) for terminal in G.terminals)
+
+    # создается словарь с ключами-нетерминалами, для каждого нетерминала создается пустое множество
     follow = {symbol: set() for symbol in G.nonterminals}
+    # для стартового нетерминала добавляется символ конца строки
     follow[G.start].add('$')
 
     while True:
+        # создаем переменную-флаг для определения изменений
         updated = False
 
         for head, bodies in G.grammar.items():
             for body in bodies:
                 for symbol in body:
+                    # для каждого значащего (непустого) символа
+                    # добавляем first к first нетерминала (левой стороне продукции) и исключаем незначащие символы
                     if symbol != '^':
                         updated |= union(first[head], first[symbol] - set('^'))
-
                         if '^' not in first[symbol]:
                             break
                     else:
                         updated |= union(first[head], set('^'))
                 else:
+                    # добавляем ^ к сету
                     updated |= union(first[head], set('^'))
 
-                aux = follow[head]
+                head_follow = follow[head]
+                # справа налево разбираем правые части продукций
                 for symbol in reversed(body):
                     if symbol == '^':
                         continue
                     if symbol in follow:
-                        updated |= union(follow[symbol], aux - set('^'))
+                        updated |= union(follow[symbol], head_follow - set('^'))
                     if '^' in first[symbol]:
-                        aux = aux | first[symbol]
+                        head_follow = head_follow | first[symbol]
                     else:
-                        aux = first[symbol]
+                        head_follow = first[symbol]
 
+        # выходим из циклв после добавления в first и follow всех возможных вариантов
         if not updated:
             return first, follow
 
 
 class SLRParser:
     def __init__(self, G):
-        self.G_prime = Grammar(f"{G.start}' -> {G.start}\n{G.grammar_str}")
-        self.max_G_prime_len = len(max(self.G_prime.grammar, key=len))
+        # задаем начальный символ
+        self.G_primary = Grammar(f"{G.start}' -> {G.start}\n{G.grammar_str}")
+        # длина самой длинной из продукций
+        self.max_G_prime_len = len(max(self.G_primary.grammar, key=len))
         self.G_indexed = []
 
-        for head, bodies in self.G_prime.grammar.items():
+        # из каждого кортежа ключ-значение из правил
+        for head, bodies in self.G_primary.grammar.items():
             for body in bodies:
+                # создаем подсписок и в упорядоченном виде добавляем в список правил
                 self.G_indexed.append([head, body])
 
-        self.first, self.follow = first_follow(self.G_prime)
-        self.C = self.items(self.G_prime)
-        self.action = list(self.G_prime.terminals) + ['$']
-        self.goto = list(self.G_prime.nonterminals - {self.G_prime.start})
+        # согласно грамматике наполняем множества FIRST и FOLLOW
+        self.first, self.follow = first_follow(self.G_primary)
+        self.all_preceding = self.items(self.G_primary)
+        # создаем список возможных действий, причем последний элемент - символ конца входной строки
+        self.action = list(self.G_primary.terminals) + ['$']
+        # создаем список возможных переходов после reduce на основе списка нетерминалов за исключением стартового
+        self.goto = list(self.G_primary.nonterminals - {self.G_primary.start})
         self.parse_table_symbols = self.action + self.goto
+        # на основе полученных данных строим таблицу
         self.parse_table = self.construct_table()
 
-    def CLOSURE(self, I):
-        J = I
+    def CLOSURE(self, initial_preceding):
+        preceding = initial_preceding
 
         while True:
-            item_len = len(J)
+            item_len = len(preceding)
 
-            for head, bodies in J.copy().items():
+            # определяем отношения предшествования
+            for head, bodies in preceding.copy().items():
+                # для каждой правой части каждой продукции
                 for body in bodies.copy():
+                    # если есть отношение предшествования
                     if '.' in body[:-1]:
                         symbol_after_dot = body[body.index('.') + 1]
-
-                        if symbol_after_dot in self.G_prime.nonterminals:
-                            for G_body in self.G_prime.grammar[symbol_after_dot]:
-                                J.setdefault(symbol_after_dot, set()).add(
+                        # если . предшествует нетерминалу, добавляем closure для этого нетерминала
+                        if symbol_after_dot in self.G_primary.nonterminals:
+                            for G_body in self.G_primary.grammar[symbol_after_dot]:
+                                preceding.setdefault(symbol_after_dot, set()).add(
                                     ('.',) if G_body == ('^',) else ('.',) + G_body)
 
-            if item_len == len(J):
-                return J
+            # условие выхода из цикла - найдены все варианты отношений
+            if item_len == len(preceding):
+                return preceding
 
-    def GOTO(self, I, X):
+    def GOTO(self, initial_preceding, symbol):
+        # инициализируем пустое множество для совокупности переходов
         goto = {}
 
-        for head, bodies in I.items():
+        for head, bodies in initial_preceding.items():
+            # для каждой правой части продукции
             for body in bodies:
+                # если в данной части есть предшествование . символу
                 if '.' in body[:-1]:
                     dot_pos = body.index('.')
 
-                    if body[dot_pos + 1] == X:
-                        replaced_dot_body = body[:dot_pos] + (X, '.') + body[dot_pos + 2:]
+                    # если символ, следующий за точкой, равен переданному символу
+                    if body[dot_pos + 1] == symbol:
+                        # переставляем точку и символ
+                        replaced_dot_body = body[:dot_pos] + (symbol, '.') + body[dot_pos + 2:]
 
+                        # для точки в новой позиции строится множество closure
                         for C_head, C_bodies in self.CLOSURE({head: {replaced_dot_body}}).items():
                             goto.setdefault(C_head, set()).update(C_bodies)
-
         return goto
 
     def items(self, G_prime):
-        C = [self.CLOSURE({G_prime.start: {('.', G_prime.start[:-1])}})]
+        # изначально точка предшествует стартовому символу
+        initial = {G_prime.start: {('.', G_prime.start[:-1])}}
+        # вызываем CLOSURE для начального состояния предшествования
+        preceding = [self.CLOSURE(initial)]
 
         while True:
-            item_len = len(C)
+            item_len = len(preceding)
+            # для каждого элемента массива предшествующих элементов
+            for internal_initial in preceding.copy():
+                # для каждого символа грамматики определяются переходы
+                for symbol in G_prime.symbols:
+                    goto = self.GOTO(internal_initial, symbol)
 
-            for I in C.copy():
-                for X in G_prime.symbols:
-                    goto = self.GOTO(I, X)
-
-                    if goto and goto not in C:
-                        C.append(goto)
-
-            if item_len == len(C):
-                return C
+                    # если переходы найдены и они еще не были добавлены - добавляем их к списку preceding
+                    if goto and goto not in preceding:
+                        preceding.append(goto)
+            # если новых переходов не добавлено - происходит выход из цикла
+            if item_len == len(preceding):
+                return preceding
 
     def construct_table(self):
-        parse_table = {r: {c: '' for c in self.parse_table_symbols} for r in range(len(self.C))}
+        parse_table = {r: {c: '' for c in self.parse_table_symbols} for r in range(len(self.all_preceding))}
 
-        for i, I in enumerate(self.C):
-            for head, bodies in I.items():
+        for i, preceding in enumerate(self.all_preceding):
+            for head, bodies in preceding.items():
                 for body in bodies:
+                    # если в правой части продукции есть точка и она не последний символ
                     if '.' in body[:-1]:  # CASE 2 a
                         symbol_after_dot = body[body.index('.') + 1]
 
-                        if symbol_after_dot in self.G_prime.terminals:
-                            s = f's{self.C.index(self.GOTO(I, symbol_after_dot))}'
-
+                        # если символ после точки - терминальный
+                        if symbol_after_dot in self.G_primary.terminals:
+                            # Определяем переход
+                            state_goto = self.GOTO(preceding, symbol_after_dot)
+                            # находим индекс конкретного перехода
+                            target_state = self.all_preceding.index(state_goto)
+                            # формируем команду сдвига и перехода в конкретное состояние
+                            s = f's{target_state}'
+                            # если такой команды в заданном месте нет
                             if s not in parse_table[i][symbol_after_dot]:
+                                # и в заданном месте есть команда свертки
                                 if 'r' in parse_table[i][symbol_after_dot]:
                                     parse_table[i][symbol_after_dot] += '/'
 
                                 parse_table[i][symbol_after_dot] += s
 
-                    elif body[-1] == '.' and head != self.G_prime.start:  # CASE 2 b
+                    elif body[-1] == '.' and head != self.G_primary.start:  # CASE 2 b
                         for j, (G_head, G_body) in enumerate(self.G_indexed):
                             if G_head == head and (G_body == body[:-1] or G_body == ('^',) and body == ('.',)):
                                 for f in self.follow[head]:
                                     if parse_table[i][f]:
                                         parse_table[i][f] += '/'
-
                                     parse_table[i][f] += f'r{j}'
-
                                 break
-
                     else:  # CASE 2 c
                         parse_table[i]['$'] = 'acc'
-
-            for A in self.G_prime.nonterminals:  # CASE 3
-                j = self.GOTO(I, A)
-
-                if j in self.C:
-                    parse_table[i][A] = self.C.index(j)
-
+            for A in self.G_primary.nonterminals:  # CASE 3
+                j = self.GOTO(preceding, A)
+                if j in self.all_preceding:
+                    parse_table[i][A] = self.all_preceding.index(j)
         return parse_table
 
     def print_info(self):
@@ -159,7 +199,7 @@ class SLRParser:
             print(f'{text:>12}: {", ".join(variable)}')
 
         def print_line():
-            print(f'+{("-" * width + "+") * (len(list(self.G_prime.symbols) + ["$"]))}')
+            print(f'+{("-" * width + "+") * (len(list(self.G_primary.symbols) + ["$"]))}')
 
         def symbols_width(symbols):
             return (width + 1) * len(symbols) - 1
@@ -170,20 +210,20 @@ class SLRParser:
             print(f'{i:>{len(str(len(self.G_indexed) - 1))}}: {head:>{self.max_G_prime_len}} -> {" ".join(body)}')
 
         print()
-        fprint('TERMINALS', self.G_prime.terminals)
-        fprint('NONTERMINALS', self.G_prime.nonterminals)
-        fprint('SYMBOLS', self.G_prime.symbols)
+        fprint('TERMINALS', self.G_primary.terminals)
+        fprint('NONTERMINALS', self.G_primary.nonterminals)
+        fprint('SYMBOLS', self.G_primary.symbols)
 
         print('\nFIRST:')
-        for head in self.G_prime.grammar:
+        for head in self.G_primary.grammar:
             print(f'{head:>{self.max_G_prime_len}} = {{ {", ".join(self.first[head])} }}')
 
         print('\nFOLLOW:')
-        for head in self.G_prime.grammar:
+        for head in self.G_primary.grammar:
             print(f'{head:>{self.max_G_prime_len}} = {{ {", ".join(self.follow[head])} }}')
 
-        width = max(len(c) for c in {'ACTION'} | self.G_prime.symbols) + 2
-        for r in range(len(self.C)):
+        width = max(len(c) for c in {'ACTION'} | self.G_primary.symbols) + 2
+        for r in range(len(self.all_preceding)):
             max_len = max(len(str(c)) for c in self.parse_table[r].values())
 
             if width < max_len + 2:
@@ -201,7 +241,7 @@ class SLRParser:
         print()
         print_line()
 
-        for r in range(len(self.C)):
+        for r in range(len(self.all_preceding)):
             print(f'|{r:^{width}}|', end=' ')
 
             for c in self.parse_table_symbols:
@@ -211,47 +251,6 @@ class SLRParser:
 
         print_line()
         print()
-
-    def generate_automaton(self):
-        automaton = Digraph('automaton', node_attr={'shape': 'record'})
-
-        for i, I in enumerate(self.C):
-            I_html = f'<<I>I</I><SUB>{i}</SUB><BR/>'
-
-            for head, bodies in I.items():
-                for body in bodies:
-                    I_html += f'<I>{head:>{self.max_G_prime_len}}</I> &#8594;'
-
-                    for symbol in body:
-                        if symbol in self.G_prime.nonterminals:
-                            I_html += f' <I>{symbol}</I>'
-                        elif symbol in self.G_prime.terminals:
-                            I_html += f' <B>{symbol}</B>'
-                        else:
-                            I_html += f' {symbol}'
-
-                    I_html += '<BR ALIGN="LEFT"/>'
-
-            automaton.node(f'I{i}', f'{I_html}>')
-
-        for r in range(len(self.C)):
-            for c in self.parse_table_symbols:
-                if isinstance(self.parse_table[r][c], int):
-                    automaton.edge(f'I{r}', f'I{self.parse_table[r][c]}', label=f'<<I>{c}</I>>')
-
-                elif 's' in self.parse_table[r][c]:
-                    i = self.parse_table[r][c][self.parse_table[r][c].index('s') + 1:]
-
-                    if '/' in i:
-                        i = i[:i.index('/')]
-
-                    automaton.edge(f'I{r}', f'I{i}', label=f'<<B>{c}</B>>' if c in self.G_prime.terminals else c)
-
-                elif self.parse_table[r][c] == 'acc':
-                    automaton.node('acc', '<<B>accept</B>>', shape='none')
-                    automaton.edge(f'I{r}', 'acc', label='$')
-
-        automaton.view()
 
     def LR_parser(self, w):
         buffer = f'{w} $'.split()
@@ -335,7 +334,6 @@ class SLRParser:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('grammar_file', type=argparse.FileType('r'), help='text file to be used as grammar')
-    parser.add_argument('-g', action='store_true', help='generate automaton')
     parser.add_argument('tokens', help='tokens to be parsed - all tokens are separated with spaces')
     args = parser.parse_args()
 
@@ -344,9 +342,6 @@ def main():
     slr_parser.print_info()
     results = slr_parser.LR_parser(args.tokens)
     slr_parser.print_LR_parser(results)
-
-    if args.g:
-        slr_parser.generate_automaton()
 
 
 if __name__ == "__main__":
